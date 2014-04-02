@@ -15,6 +15,10 @@
 #include <mach/mach.h>
 #endif
 
+#if __aarch64__
+# include <stdint.h>
+#endif
+
 #if __i386__
 # define TRAMPOLINE_JUMP        5       // jump to hook/old code
 # define TRAMPOLINE_SAVED       10      // 5+margin for saved prologue
@@ -27,6 +31,9 @@
 #elif __arm__
 # define TRAMPOLINE_JUMP        8       // jump to hook/old code (2 instructions)
 # define TRAMPOLINE_SAVED       8      // 2 reserved words for possible offsets
+#elif __aarch64__
+# define TRAMPOLINE_JUMP        16      // jump to hook/old code (4 instructions)
+# define TRAMPOLINE_SAVED       16      // 4 reserved words for possible offsets
 #else
 # error sorry this platform is not supported
 #endif
@@ -714,6 +721,21 @@ redirect(void *&from, void *to, IgHook::JumpDirection direction UNUSED)
   *insns++ = (unsigned) to;  // address to jump
   from = insns;
   return (insns - start) * 4;
+#elif __aarch64__
+  //define two macros that encode the "load PC-relative literal" LDR instruction
+  //and the "branch to register" BR instruction
+  //n is the number of the Xn register
+  //offset is the PC-relative offset of the literal
+#define ENCODE_LDR(n, offset) (0x58000000 | (((offset) & 0x1ffffc) << 3) | ((n) & 31))
+#define ENCODE_BR(n) (0xd61f0000 | (((n) & 31) << 5))
+
+  uint32_t *start = (uint32_t *) from;
+  uint32_t *insns = (uint32_t *) from;
+  *insns++ = ENCODE_LDR(16, 8);  // LDR X16, =8 // load literal at position PC+8
+  *insns++ = ENCODE_BR(16);  // BR X16  // branch to address in X16
+  *((uint64_t *)insns)++ = (uint64_t)to;  // address to jump to
+  from = insns;
+  return (insns - start) * 4; //each instruction is 32-bits wide
 #endif
 }
 
@@ -757,7 +779,7 @@ prereentry(void *&from, void *to)
 static int
 postreentry(void *&from, void *to)
 {
-#if __i386__ || __x86_64__ || __arm__
+#if __i386__ || __x86_64__ || __arm__ || __aarch64__
   // Real jump
   return redirect(from, to, IgHook::JumpFromTrampoline);
 #elif __ppc__
