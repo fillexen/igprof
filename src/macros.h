@@ -78,5 +78,13 @@
     #define RDTSC(v)  \
       v = 0;
   #endif // USER_CCNT
+#elif __aarch64__
+  #ifdef USER_CCNT
+    #define RDTSC(v)  \
+      __asm__ volatile ("MRS %0, PMCCNTR_EL0\t\n": "=r"(v));
+  #else // NO USER_CCNT
+    #define RDTSC(v)  \
+      v = 0;
+  #endif // USER_CCNT
 #endif // arch
 #endif // MACROS_H
