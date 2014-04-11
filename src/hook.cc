@@ -16,7 +16,7 @@
 #endif
 
 #if __aarch64__
-# include <stdint.h>
+#include <stdint.h>
 #endif
 
 #if __i386__
@@ -627,6 +627,53 @@ parse(const char *func, void *address, unsigned *patches)
       return -1;
     }
   }
+#elif __aarch64__
+  uint32_t *insns = (uint32_t *) address;
+  
+  if (insns[0] == ENCODE_LDR(16, 8))
+  {
+    igprof_debug("%s (%p): hook trampoline already installed, ignoring\n",
+                 func, address);
+    return -1;
+  }
+  
+  while(n < TRAMPOLINE_JUMP)
+  {
+  
+    if((insns[0] & 0x1f000000) == 0x10000000)
+    {
+      // ADR or ADRP instruction
+    }
+    else if((insns[0] & 0x3b000000) == 0x18000000 
+            && (insns[0] & 0xff000000) < 0xd8000000)
+    {
+      // LDR or LDRSW instruction
+    }
+    else if((insns[0] & 0x7c000000) == 0x14000000)
+    {
+      // B or BL instruction
+    }
+    else if((insns[0] & 0xff000010) == 0x54000000)
+    {
+      // B.<cond> instruction
+    }
+    else if((insns[0] & 0x7e000000) == 0x34000000)
+    {
+      // CBZ or CBNZ instruction
+    }
+    else if((insns[0] & 0x7e000000) == 0x36000000)
+    {
+      // TBZ or TBNZ instruction
+    }
+    else {
+      // any other instructions, not PC-relative
+    }
+    
+    n += 4;
+    ++insns;
+  }
+  
+  
 #endif
 
   *patches = 0;
@@ -722,16 +769,16 @@ redirect(void *&from, void *to, IgHook::JumpDirection direction UNUSED)
   from = insns;
   return (insns - start) * 4;
 #elif __aarch64__
-  //define two macros that encode the "load PC-relative literal" LDR instruction
-  //and the "branch to register" BR instruction
-  //n is the number of the Xn register
-  //offset is the PC-relative offset of the literal
-#define ENCODE_LDR(n, offset) (0x58000000 | (((offset) & 0x1ffffc) << 3) | ((n) & 31))
-#define ENCODE_BR(n) (0xd61f0000 | (((n) & 31) << 5))
+  // encode the "load PC-relative literal" LDR instruction
+  // n is the number of the Xn register
+  // o is the PC-relative offset of the literal
+  #define ENCODE_LDR(n, o) (0x58000000 | (((o) & 0x1ffffc) << 3) | ((n) & 31))
+  // encode the "branch to register" BR instruction
+  #define ENCODE_BR(n) (0xd61f0000 | (((n) & 31) << 5))
 
   uint32_t *start = (uint32_t *) from;
   uint32_t *insns = (uint32_t *) from;
-  *insns++ = ENCODE_LDR(16, 8);  // LDR X16, =8 // load literal at position PC+8
+  *insns++ = ENCODE_LDR(16, 8);  // LDR X16, +8 // load literal at position PC+8
   *insns++ = ENCODE_BR(16);  // BR X16  // branch to address in X16
   *((uint64_t *)insns)++ = (uint64_t)to;  // address to jump to
   from = insns;
