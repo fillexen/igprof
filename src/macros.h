@@ -1,7 +1,7 @@
 #ifndef MACROS_H
 # define MACROS_H
 
-#if __arm__
+#if __arm__ || __aarch64_
 #include "config.h"
 #endif
 
