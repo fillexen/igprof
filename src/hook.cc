@@ -858,7 +858,7 @@ prepare(void *address,
   // Second part: old function prologue + jump to post-prolugue code
   if (chain) *chain = address;
   prereentry(address, ((unsigned char *) old) + prologue);
-#if __x86_64__
+#if __x86_64__ || __aarch64__
   void *start = address;
 #endif
   memcpy(address, old, prologue);
@@ -968,22 +968,18 @@ prepare(void *address,
         // the relative address is in bits 23..5 and 30..29
         int64_t rel_addr = SIGN_EXTEND(((insns[0] >> 3) & 0x001ffffc) 
                                        | ((insns[0] >> 29) & 0x00000003), 21);
-        uint8_t *abs_addr;
-        if ((insns[0] & 0x80000000) == 0x00000000)
-        {
-          // ADR instruction
-          abs_addr = old_pc + rel_addr;
-        }
-        else
-        {
-          // ADRP instruction
-          abs_addr = (old_pc & ~4095) + (rel_addr << 12);
-        }
+        // ADR (bit 31 == 0) calculates addresses in bytes
+        // ADRP (bit 31 == 1) calculates addresses in 4096-byte pages
+        // shift is either 0 or 12
+        int shift = ((insns[0] >> 31) & 0x1) * 12;
+        uint64_t abs_addr = ((uint64_t)old_pc & ~((1 << shift) - 1)) + 
+                            (rel_addr << shift);
         
         //replace the ADR(P) instruction with a B instruction
         insns[0] = ENCODE_B(add_insns - insns);
         *add_insns++ = ENCODE_LDR(TEMP_REG, 8); // LDR X16, .+8
-        *add_insns++ = ENCODE_B(add_insns - insns + 1); // branch back
+        *add_insns = ENCODE_B(add_insns - insns + 1); // branch back
+        ++add_insns;
         *(uint64_t *)add_insns = (uint64_t)abs_addr;
         add_insns += 2;
       }
@@ -994,10 +990,10 @@ prepare(void *address,
         // get the opc and V fields to determine the length of the literal
         int opc = (insns[0] >> 30) & 0x3;
         int v = (insns[0] >> 26) & 0x1;
-        //32-, 64- or 128-bit literal
-        int literal_length = 4 << opc;
+        // length of literal in 32-bit words (1, 2 or 4)
+        int literal_len = 1 << opc;
         if (opc == 2 && v == 0)
-        	literal_length = 4;        
+          literal_len = 1;        
         
         // the relative address is in bits 23..5
         int64_t rel_addr = SIGN_EXTEND((insns[0] >> 3) & 0x001ffffc, 21);
@@ -1005,9 +1001,10 @@ prepare(void *address,
         insns[0] &= 0xff80001f;
         insns[0] |= ((add_insns - insns) << 3) & 0x00ffffe0;
 		
-		// copy the literal to the patch area
-		memcpy(add_insns, old_pc + rel_address, literal_length);
-		add_insns = (uint32_t *)((uint8_t *)add_insns + literal_length);
+        // copy the literal to the patch area
+        memcpy((void *)add_insns, (void *)(old_pc + rel_addr), 
+               literal_len * 4);
+        add_insns += literal_len;
       }
       else if ((insns[0] & 0x7c000000) == 0x14000000)
       {
@@ -1017,7 +1014,8 @@ prepare(void *address,
         // patch the relative address to the patch area of the trampoline
         insns[0] &= 0xfc000000;
         insns[0] |= ((add_insns - insns) >> 2) & 0x03ffffff;
-        redirect(add_insns, old_pc + rel_addr, IgHook::JumpFromTrampoline);
+        redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
+                 IgHook::JumpFromTrampoline);
       }
       else if ((insns[0] & 0xff000010) == 0x54000000 
                || (insns[0] & 0x7e000000) == 0x34000000)
@@ -1028,7 +1026,8 @@ prepare(void *address,
         // patch the relative address to the patch area of the trampoline
         insns[0] &= 0xff80001f;
         insns[0] |= ((add_insns - insns) << 3) & 0x00ffffe0;
-        redirect(add_insns, old_pc + rel_addr, IgHook::JumpFromTrampoline);
+        redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
+                 IgHook::JumpFromTrampoline);
       }
       else if ((insns[0] & 0x7e000000) == 0x36000000)
       {
@@ -1038,7 +1037,8 @@ prepare(void *address,
         // patch the relative address to the patch area of the trampoline
         insns[0] &= 0xfffc001f;
         insns[0] |= ((add_insns - insns) << 3) & 0x0007ffe0;
-        redirect(add_insns, old_pc + rel_addr, IgHook::JumpFromTrampoline);
+        redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
+                 IgHook::JumpFromTrampoline);
       }
       else {
         // any other instructions, not PC-relative
