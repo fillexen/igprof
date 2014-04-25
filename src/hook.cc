@@ -774,10 +774,25 @@ redirect(void *&from, void *to, IgHook::JumpDirection direction UNUSED)
 #elif __aarch64__
   uint32_t *start = (uint32_t *) from;
   uint32_t *insns = (uint32_t *) from;
-  *insns++ = ENCODE_LDR(TEMP_REG, 8);  // LDR X16, .+8
-  *insns++ = ENCODE_BR(TEMP_REG);  // BR X16
-  *(uint64_t *)insns = (uint64_t)to;  // address to jump to
-  insns += 2;
+  switch(direction)
+  {
+  case IgHook::JumpToTrampoline:
+    int64_t diff = (uint8_t *)to - (uint8_t *)from;
+    // is target reachable with a +/- 128 MB relative offset
+    // otherwise fall through to the longer jump sequence
+    if (diff >= -(1 << 27) && diff < (1 << 27))
+    {
+      *insns++ = ENCODE_B(diff);
+      break;
+    }
+
+  case IgHook::JumpFromTrampoline:
+    *insns++ = ENCODE_LDR(TEMP_REG, 8);  // LDR X16, .+8
+    *insns++ = ENCODE_BR(TEMP_REG);  // BR X16
+    *(uint64_t *)insns = (uint64_t)to;  // address to jump to
+    insns += 2;
+    break;
+  }
   from = insns;
   return (insns - start) * 4; //each instruction is 32 bits wide
 #endif
