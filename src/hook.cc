@@ -962,81 +962,86 @@ prepare(void *address,
       uint32_t *insns = (uint32_t *)((uint8_t *)start + *patches);
       uint8_t *old_pc = old_prologue_start + *patches;
 
-      if ((insns[0] & 0x1f000000) == 0x10000000)
+      if ((*insns & 0x1f000000) == 0x10000000)
       {
         // ADR or ADRP instruction
+        igprof_debug("patching ADR(P) instruction %#x at %p\n", *insns, insns);
         // the relative address is in bits 23..5 and 30..29
-        int64_t rel_addr = SIGN_EXTEND(((insns[0] >> 3) & 0x001ffffc) 
-                                       | ((insns[0] >> 29) & 0x00000003), 21);
+        int64_t rel_addr = SIGN_EXTEND(((*insns >> 3) & 0x001ffffc) 
+                                       | ((*insns >> 29) & 0x00000003), 21);
+        int dest_reg = *insns & 0x0000001f; 
         // ADR (bit 31 == 0) calculates addresses in bytes
         // ADRP (bit 31 == 1) calculates addresses in 4096-byte pages
         // shift is either 0 or 12
-        int shift = ((insns[0] >> 31) & 0x1) * 12;
-        uint64_t abs_addr = ((uint64_t)old_pc & ~((1 << shift) - 1)) + 
+        int shift = ((*insns >> 31) & 0x1) * 12;
+        uint64_t abs_addr = ((uint64_t)old_pc & ~((1ull << shift) - 1)) + 
                             (rel_addr << shift);
         
-        //replace the ADR(P) instruction with a B instruction
-        insns[0] = ENCODE_B(add_insns - insns);
-        *add_insns++ = ENCODE_LDR(TEMP_REG, 8); // LDR X16, .+8
-        *add_insns = ENCODE_B(add_insns - insns + 1); // branch back
-        ++add_insns;
+        //replace the ADR(P) instruction with a LDR instruction
+        *insns = ENCODE_LDR(dest_reg, (add_insns - insns) * 4);
         *(uint64_t *)add_insns = (uint64_t)abs_addr;
         add_insns += 2;
       }
-      else if ((insns[0] & 0x3b000000) == 0x18000000 
-               && (insns[0] & 0xff000000) < 0xd8000000)
+      else if ((*insns & 0x3b000000) == 0x18000000 
+               && (*insns & 0xff000000) < 0xd8000000)
       {
         // LDR or LDRSW instruction
+        igprof_debug("patching LDR(SW) instruction %#x at %p\n", *insns, insns);
         // get the opc and V fields to determine the length of the literal
-        int opc = (insns[0] >> 30) & 0x3;
-        int v = (insns[0] >> 26) & 0x1;
+        int opc = (*insns >> 30) & 0x3;
+        int v = (*insns >> 26) & 0x1;
         // length of literal in 32-bit words (1, 2 or 4)
         int literal_len = 1 << opc;
         if (opc == 2 && v == 0)
           literal_len = 1;        
         
         // the relative address is in bits 23..5
-        int64_t rel_addr = SIGN_EXTEND((insns[0] >> 3) & 0x001ffffc, 21);
+        int64_t rel_addr = SIGN_EXTEND((*insns >> 3) & 0x001ffffc, 21);
         // patch the relative address to the patch area of the trampoline
-        insns[0] &= 0xff80001f;
-        insns[0] |= ((add_insns - insns) << 3) & 0x00ffffe0;
+        *insns &= 0xff80001f;
+        *insns |= ((add_insns - insns) << 5) & 0x00ffffe0;
 		
         // copy the literal to the patch area
         memcpy((void *)add_insns, (void *)(old_pc + rel_addr), 
                literal_len * 4);
         add_insns += literal_len;
       }
-      else if ((insns[0] & 0x7c000000) == 0x14000000)
+      else if ((*insns & 0x7c000000) == 0x14000000)
       {
         // B or BL instruction
         // the relative address is in bits 25..0
-        int64_t rel_addr = SIGN_EXTEND((insns[0] << 2) & 0x0ffffffc, 28);
+        int64_t rel_addr = SIGN_EXTEND((*insns << 2) & 0x0ffffffc, 28);
+        igprof_debug("patching B(L)%+llx instruction %#x at %p\n", 
+                     rel_addr, *insns, insns);
         // patch the relative address to the patch area of the trampoline
-        insns[0] &= 0xfc000000;
-        insns[0] |= ((add_insns - insns) >> 2) & 0x03ffffff;
+        *insns &= 0xfc000000;
+        *insns |= (add_insns - insns) & 0x03ffffff;
         redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
                  IgHook::JumpFromTrampoline);
       }
-      else if ((insns[0] & 0xff000010) == 0x54000000 
-               || (insns[0] & 0x7e000000) == 0x34000000)
+      else if ((*insns & 0xff000010) == 0x54000000 
+               || (*insns & 0x7e000000) == 0x34000000)
       {
         // B.<cond>, CBZ or CBNZ instruction
+        igprof_debug("patching B.cond or CB(N)Z instruction %#x at %p\n", 
+                     *insns, insns);
         // the relative address is in bits 23..5
-        int64_t rel_addr = SIGN_EXTEND((insns[0] >> 3) & 0x001ffffc, 21);
+        int64_t rel_addr = SIGN_EXTEND((*insns >> 3) & 0x001ffffc, 21);
         // patch the relative address to the patch area of the trampoline
-        insns[0] &= 0xff80001f;
-        insns[0] |= ((add_insns - insns) << 3) & 0x00ffffe0;
+        *insns &= 0xff80001f;
+        *insns |= ((add_insns - insns) << 5) & 0x00ffffe0;
         redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
                  IgHook::JumpFromTrampoline);
       }
-      else if ((insns[0] & 0x7e000000) == 0x36000000)
+      else if ((*insns & 0x7e000000) == 0x36000000)
       {
         // TBZ or TBNZ instruction
+        igprof_debug("patching TB(N)Z instruction %#x at %p\n", *insns, insns);
         // the relative address is in bits 18..5
-        int64_t rel_addr = SIGN_EXTEND((insns[0] >> 3) & 0x0000fffc, 16);
+        int64_t rel_addr = SIGN_EXTEND((*insns >> 3) & 0x0000fffc, 16);
         // patch the relative address to the patch area of the trampoline
-        insns[0] &= 0xfffc001f;
-        insns[0] |= ((add_insns - insns) << 3) & 0x0007ffe0;
+        *insns &= 0xfffc001f;
+        *insns |= ((add_insns - insns) << 5) & 0x0007ffe0;
         redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
                  IgHook::JumpFromTrampoline);
       }

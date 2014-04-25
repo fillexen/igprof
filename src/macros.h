@@ -90,8 +90,8 @@
 
 #if __aarch64__
 // sign extend o from n bits
-#define SIGN_EXTEND_MASK(n) (1 << ((n) - 1))
-#define SIGN_EXTEND(o, n) ((((o) & ((1 << (n)) - 1)) ^ SIGN_EXTEND_MASK(n)) \
+#define SIGN_EXTEND_MASK(n) (1ull << ((n) - 1))
+#define SIGN_EXTEND(o, n) ((((o) & ((1ull << (n)) - 1)) ^ SIGN_EXTEND_MASK(n)) \
                            - SIGN_EXTEND_MASK(n))
 // encode the "load PC-relative literal" LDR instruction
 // n is the number of the Xn register
