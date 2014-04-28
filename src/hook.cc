@@ -639,36 +639,41 @@ parse(const char *func, void *address, unsigned *patches)
   
   while (n < TRAMPOLINE_JUMP)
   {
+    // Each patch entry contains one's complement of the offset (in bytes)
+    // to an instruction that needs to be patched because of PC-relative
+    // addressing. The patch list is terminated by 0 (not in one's complement).
+    // This allows a distinction between offset 0 and the end of the patch
+    // list.
     if ((insns[0] & 0x1f000000) == 0x10000000)
     {
       // ADR or ADRP instruction
-      *patches++ = n;
+      *patches++ = ~n;
     }
     else if ((insns[0] & 0x3b000000) == 0x18000000 
             && (insns[0] & 0xff000000) < 0xd8000000)
     {
       // LDR or LDRSW instruction
-      *patches++ = n;
+      *patches++ = ~n;
     }
     else if ((insns[0] & 0x7c000000) == 0x14000000)
     {
       // B or BL instruction
-      *patches++ = n;
+      *patches++ = ~n;
     }
     else if ((insns[0] & 0xff000010) == 0x54000000)
     {
       // B.<cond> instruction
-      *patches++ = n;
+      *patches++ = ~n;
     }
     else if ((insns[0] & 0x7e000000) == 0x34000000)
     {
       // CBZ or CBNZ instruction
-      *patches++ = n;
+      *patches++ = ~n;
     }
     else if ((insns[0] & 0x7e000000) == 0x36000000)
     {
       // TBZ or TBNZ instruction
-      *patches++ = n;
+      *patches++ = ~n;
     }
     else {
       // any other instructions, not PC-relative
@@ -969,13 +974,14 @@ prepare(void *address,
   // Patch PC-relative instructions
   if (patches)
   {
-    uint32_t *add_insns = (uint32_t *)address;
+    uint32_t *patch_insns = (uint32_t *)address;
     uint8_t *old_prologue_start = (uint8_t *)old - prologue;
         
     for( ; *patches; ++patches)
     {
-      uint32_t *insns = (uint32_t *)((uint8_t *)start + *patches);
-      uint8_t *old_pc = old_prologue_start + *patches;
+      unsigned int offset = ~*patches;
+      uint32_t *insns = (uint32_t *)((uint8_t *)start + offset);
+      uint8_t *old_pc = old_prologue_start + offset;
 
       if ((*insns & 0x1f000000) == 0x10000000)
       {
@@ -993,9 +999,9 @@ prepare(void *address,
                             (rel_addr << shift);
         
         //replace the ADR(P) instruction with a LDR instruction
-        *insns = ENCODE_LDR(dest_reg, (add_insns - insns) * 4);
-        *(uint64_t *)add_insns = (uint64_t)abs_addr;
-        add_insns += 2;
+        *insns = ENCODE_LDR(dest_reg, (patch_insns - insns) * 4);
+        *(uint64_t *)patch_insns = (uint64_t)abs_addr;
+        patch_insns += 2;
       }
       else if ((*insns & 0x3b000000) == 0x18000000 
                && (*insns & 0xff000000) < 0xd8000000)
@@ -1014,12 +1020,12 @@ prepare(void *address,
         int64_t rel_addr = SIGN_EXTEND((*insns >> 3) & 0x001ffffc, 21);
         // patch the relative address to the patch area of the trampoline
         *insns &= 0xff80001f;
-        *insns |= ((add_insns - insns) << 5) & 0x00ffffe0;
+        *insns |= ((patch_insns - insns) << 5) & 0x00ffffe0;
 		
         // copy the literal to the patch area
-        memcpy((void *)add_insns, (void *)(old_pc + rel_addr), 
+        memcpy((void *)patch_insns, (void *)(old_pc + rel_addr), 
                literal_len * 4);
-        add_insns += literal_len;
+        patch_insns += literal_len;
       }
       else if ((*insns & 0x7c000000) == 0x14000000)
       {
@@ -1030,8 +1036,8 @@ prepare(void *address,
                      rel_addr, *insns, insns);
         // patch the relative address to the patch area of the trampoline
         *insns &= 0xfc000000;
-        *insns |= (add_insns - insns) & 0x03ffffff;
-        redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
+        *insns |= (patch_insns - insns) & 0x03ffffff;
+        redirect((void *&)patch_insns, (void *)(old_pc + rel_addr), 
                  IgHook::JumpFromTrampoline);
       }
       else if ((*insns & 0xff000010) == 0x54000000 
@@ -1044,8 +1050,8 @@ prepare(void *address,
         int64_t rel_addr = SIGN_EXTEND((*insns >> 3) & 0x001ffffc, 21);
         // patch the relative address to the patch area of the trampoline
         *insns &= 0xff80001f;
-        *insns |= ((add_insns - insns) << 5) & 0x00ffffe0;
-        redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
+        *insns |= ((patch_insns - insns) << 5) & 0x00ffffe0;
+        redirect((void *&)patch_insns, (void *)(old_pc + rel_addr), 
                  IgHook::JumpFromTrampoline);
       }
       else if ((*insns & 0x7e000000) == 0x36000000)
@@ -1056,15 +1062,15 @@ prepare(void *address,
         int64_t rel_addr = SIGN_EXTEND((*insns >> 3) & 0x0000fffc, 16);
         // patch the relative address to the patch area of the trampoline
         *insns &= 0xfffc001f;
-        *insns |= ((add_insns - insns) << 5) & 0x0007ffe0;
-        redirect((void *&)add_insns, (void *)(old_pc + rel_addr), 
+        *insns |= ((patch_insns - insns) << 5) & 0x0007ffe0;
+        redirect((void *&)patch_insns, (void *)(old_pc + rel_addr), 
                  IgHook::JumpFromTrampoline);
       }
       else {
         // any other instructions, not PC-relative
       }
     }
-    address = add_insns;
+    address = patch_insns;
   }
 #endif
 }
