@@ -28,7 +28,7 @@ LIBHOOK(3, int, dosigaction, _main,
 //segfault in the doclose / dofclose hooks. For the moment I just exclude the
 //hook, however given it is actually used to protect an output corruption in
 //case a program closes stderr, we should probably find a better solution.
-#if !defined(__arm__) && !defined(__aarch64__)
+#ifndef __arm__
 LIBHOOK(1, int, dofclose, _main, (FILE * stream), (stream), "fclose", 0, 0)
 LIBHOOK(1, int, doclose, _main, (int fd), (fd), "close", 0, 0)
 #endif
@@ -197,7 +197,7 @@ initialize(void)
   IgHook::hook(dosystem_hook_main.raw);
   IgHook::hook(dopthread_sigmask_hook_main.raw);
   IgHook::hook(dosigaction_hook_main.raw);
-#if !defined(__arm__) && !defined(__aarch64__)
+#ifndef __arm__
   IgHook::hook(doclose_hook_main.raw);
   IgHook::hook(dofclose_hook_main.raw);
 #endif
@@ -387,7 +387,7 @@ dosystem(IgHook::SafeData<igprof_dosystem_t> &hook, const char *cmd)
   return ret;
 }
 
-#if !defined(__arm__) && !defined(__aarch64__)
+#ifndef __arm__
 // If the profiled program closes stderr stream the igprof_debug got to be
 // disabled by changing the value of s_igprof_stderrOpen (declared in profile.h
 // an defined in profile.cc) to false. This is don by instrumenting close and and
