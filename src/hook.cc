@@ -632,7 +632,7 @@ parse(const char *func, void *address, unsigned *patches)
   uint32_t *insns = (uint32_t *) address;
   
   if (insns[0] == ENCODE_LDR(TEMP_REG, 8) // LDR X16, .+8
-      /* || (insns[0] & 0xfc000000) == 0x14000000 */ ) // B
+      && insns[1] == ENCODE_BR(TEMP_REG)) // BR X16
   {
     igprof_debug("%s (%p): hook trampoline already installed, ignoring\n",
                  func, address);
@@ -755,22 +755,10 @@ redirect(void *&from, void *to, IgHook::JumpDirection direction UNUSED)
 #elif __aarch64__
   uint32_t *start = (uint32_t *) from;
   uint32_t *insns = (uint32_t *) from;
-/*
-  int64_t diff = (uint8_t *)to - (uint8_t *)from;
-  // check if target is reachable with a +/- 128 MB relative offset
-  // otherwise, jump to an absolute 64-bit address
-  if (diff >= -(1ll << 27) && diff < (1ll << 27))
-  {
-    *insns++ = ENCODE_B(diff);
-  }
-  else
-*/
-  {
-    *insns++ = ENCODE_LDR(TEMP_REG, 8);  // LDR X16, .+8
-    *insns++ = ENCODE_BR(TEMP_REG);  // BR X16
-    *(uint64_t *)insns = (uint64_t)to;  // address to jump to
-    insns += 2;
-  }
+  *insns++ = ENCODE_LDR(TEMP_REG, 8);  // LDR X16, .+8
+  *insns++ = ENCODE_BR(TEMP_REG);  // BR X16
+  *(uint64_t *)insns = (uint64_t)to;  // address to jump to
+  insns += 2;
   from = insns;
   return (insns - start) * 4; //each instruction is 32 bits wide
 #endif
