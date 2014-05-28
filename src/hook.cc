@@ -89,15 +89,20 @@ allocate(void *&ptr, void *target UNUSED)
   do retcode = vm_allocate(mach_task_self(), &address, pagesize, FALSE);
   while (retcode != KERN_SUCCESS && (address += pagesize) < limit);
   void *addr = (address < limit ? (void *) address : MAP_FAILED);
-#elif __linux__ && __x86_64__
+#elif __linux__ && __x86_64__ || __aarch64__
   // Find a memory page we can allocate in the same 32-bit section.
   // JMP instruction doesn't have an 8-byte address version, and in
   // any case we don't want to use that long instruction sequence:
   // we'd have to use at least 10-12 bytes of the function prefix,
   // which frequently isn't location independent so we'd have to
   // parse and rewrite the code if we copied it.
+#if __x86_64__
+  unsigned long mask = 0xffffffff00000000;
+#else //__aarch64__
+  unsigned long mask = 0xfffffffff8000000;
+#endif
   unsigned long address = (unsigned long) target;
-  unsigned long baseaddr = (address & 0xffffffff00000000);
+  unsigned long baseaddr = (address & mask);
   unsigned long freepage = address + 1;
 
   FILE *maps = fopen("/proc/self/maps", "r");
@@ -122,7 +127,7 @@ allocate(void *&ptr, void *target UNUSED)
       if (sscanf(range, "%lx-%lx", &low, &high) != 2)
 	continue;
 
-      if ((low & 0xffffffff00000000) == baseaddr
+      if ((low & mask) == baseaddr
 	  && freepage >= low
 	  && freepage < high)
 	freepage = high;
@@ -131,7 +136,7 @@ allocate(void *&ptr, void *target UNUSED)
     fclose(maps);
   }
 
-  if ((freepage & 0xffffffff00000000) != baseaddr)
+  if ((freepage & mask) != baseaddr)
   {
     ptr = 0;
     return IgHook::ErrAllocateTrampoline;
