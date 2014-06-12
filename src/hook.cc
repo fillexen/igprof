@@ -30,11 +30,10 @@
 # define TRAMPOLINE_SAVED       4       // one prologue instruction to save
 #elif __arm__
 # define TRAMPOLINE_JUMP        8       // jump to hook/old code (2 instructions)
-# define TRAMPOLINE_SAVED       8      // 2 reserved words for possible offsets
+# define TRAMPOLINE_SAVED       8       // 2 reserved words for possible offsets
 #elif __aarch64__
-# define TRAMPOLINE_JUMP        16      // jump to hook/old code (4 instructions)
-# define TRAMPOLINE_SAVED       80      // 4 instructions + 4 patch instructions
-                                        // each
+# define TRAMPOLINE_JUMP        4       // jump to hook/old code (short jump)
+# define TRAMPOLINE_SAVED       32      // long jump+patch area
 #else
 # error sorry this platform is not supported
 #endif
@@ -90,16 +89,17 @@ allocate(void *&ptr, void *target UNUSED)
   while (retcode != KERN_SUCCESS && (address += pagesize) < limit);
   void *addr = (address < limit ? (void *) address : MAP_FAILED);
 #elif __linux__ && __x86_64__ || __aarch64__
+#if __x86_64__
   // Find a memory page we can allocate in the same 32-bit section.
   // JMP instruction doesn't have an 8-byte address version, and in
   // any case we don't want to use that long instruction sequence:
   // we'd have to use at least 10-12 bytes of the function prefix,
   // which frequently isn't location independent so we'd have to
   // parse and rewrite the code if we copied it.
-#if __x86_64__
-  unsigned long mask = 0xffffffff00000000;
+  const unsigned long mask = 0xffffffff00000000;
 #else //__aarch64__
-  unsigned long mask = 0xfffffffff8000000;
+  // Find a memory page close enough we can jump to using a B instruction.
+  const unsigned long mask = 0xfffffffff8000000;
 #endif
   unsigned long address = (unsigned long) target;
   unsigned long baseaddr = (address & mask);
@@ -643,6 +643,20 @@ parse(const char *func, void *address, unsigned *patches)
                  func, address);
     return -1;
   }
+  else if ((insns[0] & 0xfc000000) == 0x14000000) // B instruction
+  {
+    if ((((insns[0] << 2) + (uint64_t)insns) & 0xfff) == 0x004)
+    {
+      igprof_debug("%s (%p): hook trampoline already installed, ignoring\n",
+                   func, address);
+      return -1;
+    }
+    else
+    {
+      igprof_debug("%s (%p): branch instruction found, but not a hook target\n",
+                   func, address);
+    }
+  }
   
   while (n < TRAMPOLINE_JUMP)
   {
@@ -760,10 +774,25 @@ redirect(void *&from, void *to, IgHook::JumpDirection direction UNUSED)
 #elif __aarch64__
   uint32_t *start = (uint32_t *) from;
   uint32_t *insns = (uint32_t *) from;
-  *insns++ = ENCODE_LDR(TEMP_REG, 8);  // LDR X16, .+8
-  *insns++ = ENCODE_BR(TEMP_REG);  // BR X16
-  *(uint64_t *)insns = (uint64_t)to;  // address to jump to
-  insns += 2;
+  int64_t diff = (uint64_t)to - (uint64_t)from;
+
+  switch(direction)
+  {
+  // short jump
+  case IgHook::JumpToTrampoline:
+    assert(diff >= -(1 << 27) && diff < (1 << 27));
+    *insns++ = ENCODE_B(diff);
+    break;
+
+  // long jump
+  case IgHook::JumpFromTrampoline:
+    *insns++ = ENCODE_LDR(TEMP_REG, 8);  // LDR X16, .+8
+    *insns++ = ENCODE_BR(TEMP_REG);  // BR X16
+    *(uint64_t *)insns = (uint64_t)to;  // address to jump to
+    insns += 2;
+    break;
+  }
+
   from = insns;
   return (insns - start) * 4; //each instruction is 32 bits wide
 #endif
@@ -891,6 +920,13 @@ prepare(void *address,
     skip(old, prologue);
     postreentry(address, old);
   }
+#elif __aarch64__
+  skip(address, prologue);
+  skip(old, prologue);
+  // Use a short jump when jumping from the trampoline to the instrumented
+  // function. IgHook::JumpToTrampoline is used in order to generate a short
+  // jump, even if the jump is away from the trampoline.
+  redirect(address, old, IgHook::JumpToTrampoline);
 #else
   skip(address, prologue);
   skip(old, prologue);
@@ -1007,7 +1043,7 @@ prepare(void *address,
         *insns &= 0xfc000000;
         *insns |= (patch_insns - insns) & 0x03ffffff;
         redirect((void *&)patch_insns, (void *)(old_pc + rel_addr),
-                 IgHook::JumpFromTrampoline);
+                 IgHook::JumpToTrampoline);
       }
       else if ((*insns & 0xff000010) == 0x54000000)
       {
@@ -1022,7 +1058,7 @@ prepare(void *address,
         *insns &= 0xff80001f;
         *insns |= ((patch_insns - insns) << 5) & 0x00ffffe0;
         redirect((void *&)patch_insns, (void *)(old_pc + rel_addr),
-                 IgHook::JumpFromTrampoline);
+                 IgHook::JumpToTrampoline);
       }
       else if ((*insns & 0x7e000000) == 0x34000000)
       {
@@ -1036,7 +1072,7 @@ prepare(void *address,
         *insns &= 0xff80001f;
         *insns |= ((patch_insns - insns) << 5) & 0x00ffffe0;
         redirect((void *&)patch_insns, (void *)(old_pc + rel_addr),
-                 IgHook::JumpFromTrampoline);
+                 IgHook::JumpToTrampoline);
       }
       else if ((*insns & 0x7e000000) == 0x36000000)
       {
@@ -1051,7 +1087,7 @@ prepare(void *address,
         *insns &= 0xfffc001f;
         *insns |= ((patch_insns - insns) << 5) & 0x0007ffe0;
         redirect((void *&)patch_insns, (void *)(old_pc + rel_addr), 
-                 IgHook::JumpFromTrampoline);
+                 IgHook::JumpToTrampoline);
       }
     }
     address = patch_insns;

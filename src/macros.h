@@ -102,11 +102,6 @@
 // encode the "branch" B instruction
 #define ENCODE_B(o) (0x14000000 | (((o) >> 2) & 0x03ffffff))
 #define TEMP_REG 16
-// is a 28-bit relative address enough
-#define IS_REL28(from, to) { \
-  int diff = (to) - (from), \
-  (diff >= -(1 << 27) && diff < (1 << 27)) \
-}
 #endif
 
 #endif // MACROS_H
