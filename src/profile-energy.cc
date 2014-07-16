@@ -8,8 +8,12 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/time.h>
+#include <vector>
 #ifdef PAPI_FOUND
 #  include <papi.h>
+#  define READ_ENERGY(event_set, values) PAPI_read(event_set, values)
+#else
+#  define READ_ENERGY(event_set, values) /* */
 #endif
 
 #ifdef __APPLE__
@@ -38,20 +42,37 @@ LIBHOOK(1, int, doclose, _main, (int fd), (fd), "close", 0, 0)
 #endif
 
 // Data for this profiler module
-static IgProfTrace::CounterDef  s_ct_ticks      = { "ENERGY", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pkg        = { "NRG_PKG", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_cpu        = { "NRG_CPU", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_gpu        = { "NRG_GPU", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_dram       = { "NRG_DRAM", IgProfTrace::TICK, -1, 0 };
 static bool                     s_initialized   = false;
 static bool                     s_keep          = false;
 static int                      s_signal        = SIGPROF;
 static int                      s_itimer        = ITIMER_PROF;
-#ifdef PAPI_FOUND
-static int                      s_event_set     = PAPI_NULL;
+static int                      s_event_set     = 0;
 static int                      s_num_events    = 0;
 static long long                *s_values       = 0;
-#endif // PAPI_FOUND
+static long long                *s_prev_values  = 0;
+static std::vector<IgProfTrace::CounterDef *> s_counters;
 
 /** Convert timeval to seconds. */
 static inline double tv2sec(const timeval &tv)
 { return tv.tv_sec + tv.tv_usec * 1e-6; }
+
+/** Tick the energy measurement counters. It is necessary to actually read
+    the measurements (using READ_ENERGY()) before calling this function. */
+static void
+tickEnergyCounters(IgProfTrace *buf, IgProfTrace::Stack *frame, int nticks)
+{
+  for (int i = 0; i < s_num_events; ++i)
+  {
+    // FIXME! convert value!!!
+    if (s_counters[i])
+      buf->tick(frame, s_counters[i], s_values[i] - s_prev_values[i], nticks);
+    s_prev_values[i] = s_values[i];
+  }
+}
 
 /** Energy profiler signal handler, SIGPROF or SIGALRM depending
     on the current profiler mode.  Record a tick for the current
@@ -67,6 +88,8 @@ profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
     IgProfTrace *buf = igprof_buffer();
     if (LIKELY(buf))
     {
+      READ_ENERGY(s_event_set, s_values);
+
       IgProfTrace::Stack *frame;
       uint64_t tstart, tend;
       int depth;
@@ -75,15 +98,11 @@ profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
       depth = IgHookTrace::stacktrace(addresses, IgProfTrace::MAX_DEPTH);
       RDTSC(tend);
 
-#ifdef PAPI_FOUND
-      PAPI_read(s_event_set, s_values);
-#endif // PAPI_FOUND
-
       // Drop top two stackframes (me, signal frame).
       buf->lock();
       frame = buf->push(addresses+2, depth-2);
-      // add the
-      buf->tick(frame, &s_ct_ticks, 1, 1);
+      // buf->tick(frame, &s_ct_ticks, 1, 1);
+      tickEnergyCounters(buf, frame, 1);
       buf->traceperf(depth, tstart, tend);
       buf->unlock();
     }
@@ -163,6 +182,7 @@ energyInit(void)
   }
 
   // Create an event set.
+  s_event_set = PAPI_NULL;
   if (PAPI_create_eventset(&s_event_set) != PAPI_OK)
   {
     igprof_debug("Could not create PAPI event set.\n");
@@ -170,7 +190,6 @@ energyInit(void)
   }
   
   int code = PAPI_NATIVE_MASK;
-  int num_events = 0;
   for (int retval = PAPI_enum_cmp_event(&code, PAPI_ENUM_FIRST, component_id);
        retval == PAPI_OK;
        retval = PAPI_enum_cmp_event(&code, PAPI_ENUM_EVENTS, component_id))
@@ -181,8 +200,6 @@ energyInit(void)
       igprof_debug("Could not get PAPI event name.\n");
       return false;
     }
-	if (!strstr(event_name, "ENERGY"))
-	  continue;
     
     PAPI_event_info_t event_info;
     if (PAPI_get_event_info(code, &event_info) != PAPI_OK)
@@ -190,15 +207,37 @@ energyInit(void)
       igprof_debug("Could not get PAPI event info.\n");
       return false;
     }
-    if (event_info.data_type != PAPI_DATATYPE_FP64)
+    if (event_info.data_type != PAPI_DATATYPE_UINT64)
+      continue;
+      
+    IgProfTrace::CounterDef *counter = 0;
+    if (strstr(event_name, "PACKAGE_ENERGY_CNT"))
+      counter = &s_ct_pkg;
+    else if (strstr(event_name, "PP0_ENERGY_CNT"))
+      counter = &s_ct_cpu;
+    else if (strstr(event_name, "PP1_ENERGY_CNT"))
+      counter = &s_ct_gpu;
+    else if (strstr(event_name, "DRAM_ENERGY_CNT"))
+      counter = &s_ct_dram;
+
+    if(!counter)
       continue;
     
+    igprof_debug("Adding %s to event set.\n", event_name);
     if (PAPI_add_event(s_event_set, code) != PAPI_OK)
       break;
-    ++num_events;
+    s_counters.push_back(counter);
+    ++s_num_events;
   }
   
-  s_values = new long long[s_num_events];
+  s_values = (long long *)calloc(s_num_events, sizeof(long long));
+  s_prev_values = (long long *)calloc(s_num_events, sizeof(long long));
+  if (!s_values || !s_prev_values)
+  {
+    igprof_debug("Error allocating memory.\n");
+    return false;
+  }
+  
   if (PAPI_start(s_event_set) != PAPI_OK)
   {
     igprof_debug("Could not start measuring energy using PAPI.\n");
@@ -415,6 +454,8 @@ dofork(IgHook::SafeData<igprof_dofork_t> &hook)
 
     if (enabled && nticks && (buf = igprof_buffer()))
     {
+      READ_ENERGY(s_event_set, s_values);
+
       void *addresses[IgProfTrace::MAX_DEPTH];
       IgProfTrace::Stack *frame;
       uint64_t tstart, tend;
@@ -427,7 +468,8 @@ dofork(IgHook::SafeData<igprof_dofork_t> &hook)
       // Replace top stack frame (this hook) with the original.
       if (depth > 0) addresses[0] = __extension__ (void *) hook.original;
       frame = buf->push(addresses, depth);
-      buf->tick(frame, &s_ct_ticks, 1, nticks);
+      // buf->tick(frame, &s_ct_ticks, 1, nticks);
+      tickEnergyCounters(buf, frame, nticks);
       buf->traceperf(depth, tstart, tend);
     }
 
@@ -472,6 +514,8 @@ dosystem(IgHook::SafeData<igprof_dosystem_t> &hook, const char *cmd)
   nticks = (ival > 0 ? int(dt / ival + 0.5) : 0);
   if (enabled && nticks && (buf = igprof_buffer()))
   {
+    READ_ENERGY(s_event_set, s_values);
+
     void *addresses[IgProfTrace::MAX_DEPTH];
     IgProfTrace::Stack *frame;
     uint64_t tstart, tend;
@@ -484,7 +528,8 @@ dosystem(IgHook::SafeData<igprof_dosystem_t> &hook, const char *cmd)
     // Replace top stack frame (this hook) with the original.
     if (depth > 0) addresses[0] = __extension__ (void *) hook.original;
     frame = buf->push(addresses, depth);
-    buf->tick(frame, &s_ct_ticks, 1, nticks);
+    // buf->tick(frame, &s_ct_ticks, 1, nticks);
+    tickEnergyCounters(buf, frame, nticks);
     buf->traceperf(depth, tstart, tend);
   }
 
