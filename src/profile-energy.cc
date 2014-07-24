@@ -9,11 +9,12 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <vector>
+#include <unistd.h>
 #ifdef PAPI_FOUND
 #  include <papi.h>
-#  define READ_ENERGY(event_set, values) PAPI_read(event_set, values)
+#  define READ_ENERGY() PAPI_read(s_event_set, s_values[s_cur_index])
 #else
-#  define READ_ENERGY(event_set, values) /* */
+#  define READ_ENERGY() /* */
 #endif
 
 #ifdef __APPLE__
@@ -52,27 +53,160 @@ static int                      s_signal        = SIGPROF;
 static int                      s_itimer        = ITIMER_PROF;
 static int                      s_event_set     = 0;
 static int                      s_num_events    = 0;
-static long long                *s_values       = 0;
-static long long                *s_prev_values  = 0;
+static long long                *s_values[2]    = { 0, 0 };
+static int                      s_cur_index     = 0;
 static std::vector<IgProfTrace::CounterDef *> s_counters;
 
-/** Convert timeval to seconds. */
-static inline double tv2sec(const timeval &tv)
-{ return tv.tv_sec + tv.tv_usec * 1e-6; }
+/** Set up PAPI for energy measurements. */
+static bool
+energyInit(double &scaleFactor)
+{
+#ifdef PAPI_FOUND
+  if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT)
+  {
+    fprintf(stderr, "PAPI library initialisation failed.\n");
+    return false;
+  }
+  
+  // Find the RAPL component of PAPI.
+  int num_components = PAPI_num_components();
+  int component_id;
+  const PAPI_component_info_t *component_info = 0;
+  for (component_id = 0; component_id < num_components; ++component_id)
+  {
+    component_info = PAPI_get_component_info(component_id);
+    if (component_info && strstr(component_info->name, "rapl"))
+    {
+      break;
+    }
+  }
+  if (component_id == num_components)
+  {
+    fprintf(stderr, "No RAPL component found in PAPI library.\n");
+    return false;
+  }
+  
+  if (component_info->disabled)
+  {
+    fprintf(stderr, "RAPL component of PAPI disabled: %s.\n", 
+      component_info->disabled_reason);
+    return false;
+  }
+  
+  // Create an event set.
+  s_event_set = PAPI_NULL;
+  if (PAPI_create_eventset(&s_event_set) != PAPI_OK)
+  {
+    fprintf(stderr, "Could not create PAPI event set.\n");
+    return false;
+  }
+  
+  int code = PAPI_NATIVE_MASK;
+  for (int retval = PAPI_enum_cmp_event(&code, PAPI_ENUM_FIRST, component_id);
+       retval == PAPI_OK;
+       retval = PAPI_enum_cmp_event(&code, PAPI_ENUM_EVENTS, component_id))
+  {
+    char event_name[PAPI_MAX_STR_LEN];
+    if (PAPI_event_code_to_name(code, event_name) != PAPI_OK)
+    {
+      fprintf(stderr, "Could not get PAPI event name.\n");
+      return false;
+    }
+    
+    PAPI_event_info_t event_info;
+    if (PAPI_get_event_info(code, &event_info) != PAPI_OK)
+    {
+      fprintf(stderr, "Could not get PAPI event info.\n");
+      return false;
+    }
+    if (event_info.data_type != PAPI_DATATYPE_UINT64)
+      continue;
+      
+    IgProfTrace::CounterDef *counter = 0;
+    if (strstr(event_name, "PACKAGE_ENERGY_CNT"))
+      counter = &s_ct_pkg;
+    else if (strstr(event_name, "PP0_ENERGY_CNT"))
+      counter = &s_ct_cpu;
+    else if (strstr(event_name, "PP1_ENERGY_CNT"))
+      counter = &s_ct_gpu;
+    else if (strstr(event_name, "DRAM_ENERGY_CNT"))
+      counter = &s_ct_dram;
+
+    if (! counter)
+      continue;
+    
+    igprof_debug("Adding %s to event set.\n", event_name);
+    if (PAPI_add_event(s_event_set, code) != PAPI_OK)
+      break;
+    s_counters.push_back(counter);
+    ++s_num_events;
+  }
+  if (s_num_events == 0)
+  {
+    fprintf(stderr, "Could not find any RAPL events.");
+    return false;
+  }
+  
+  // Allocate two arrays for the readings in one go: one for the current 
+  // readings and one for the previous readings.
+  s_values[0] = (long long *)calloc(2 * s_num_events, sizeof(long long));
+  s_values[1] = s_values[0] + s_num_events;
+  if (! s_values[0])
+  {
+    fprintf(stderr, "Could not allocate memory.\n");
+    return false;
+  }
+  
+  // Set the scale factor for the RAPL energy readings:
+  // one integer step is 15.3 microjoules, scale everything to millijoule.
+  scaleFactor = 0.0000153;
+
+  return true;
+  // stop measuring and get the measurements
+  // clean up event set
+  // destroy event set
+#else
+  fprintf(stderr, "IgProf not built with PAPI support.\n");
+  return false;
+#endif // PAPI_FOUND
+}
+
+/** Start measuring energy through PAPI. */
+static bool
+energyStart(void)
+{
+#ifdef PAPI_FOUND
+  if (PAPI_start(s_event_set) == PAPI_OK)
+    return true;
+  
+  fprintf(stderr, "Could not start measuring energy using PAPI.\n");
+#endif
+  return false;
+}
 
 /** Tick the energy measurement counters. It is necessary to actually read
     the measurements (using READ_ENERGY()) before calling this function. */
 static void
 tickEnergyCounters(IgProfTrace *buf, IgProfTrace::Stack *frame, int nticks)
 {
+  int prev_index = 1 - s_cur_index;
+
   for (int i = 0; i < s_num_events; ++i)
   {
-    // FIXME! convert value!!!
-    if (s_counters[i])
-      buf->tick(frame, s_counters[i], s_values[i] - s_prev_values[i], nticks);
-    s_prev_values[i] = s_values[i];
+    ASSERT(s_counters[i]);
+    // Use the difference between the current and the previous reading.
+    buf->tick(frame, s_counters[i],
+              s_values[s_cur_index][i] - s_values[prev_index][i],
+              nticks);
   }
+
+  // Swap buffers.
+  s_cur_index = prev_index;
 }
+
+/** Convert timeval to seconds. */
+static inline double tv2sec(const timeval &tv)
+{ return tv.tv_sec + tv.tv_usec * 1e-6; }
 
 /** Energy profiler signal handler, SIGPROF or SIGALRM depending
     on the current profiler mode.  Record a tick for the current
@@ -88,7 +222,7 @@ profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
     IgProfTrace *buf = igprof_buffer();
     if (LIKELY(buf))
     {
-      READ_ENERGY(s_event_set, s_values);
+      READ_ENERGY();
 
       IgProfTrace::Stack *frame;
       uint64_t tstart, tend;
@@ -145,115 +279,6 @@ threadInit(void)
   enableTimer();
 }
 
-/** Set up PAPI for energy measurements. */
-static bool
-energyInit(void)
-{
-#ifdef PAPI_FOUND
-  if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT)
-  {
-    igprof_debug("PAPI library initialisation failed.\n");
-    return false;
-  }
-  
-  // Find the RAPL component of PAPI.
-  int num_components = PAPI_num_components();
-  int component_id;
-  const PAPI_component_info_t *component_info = 0;
-  for (component_id = 0; component_id < num_components; ++component_id)
-  {
-    component_info = PAPI_get_component_info(component_id);
-    if (component_info && strstr(component_info->name, "rapl"))
-    {
-      break;
-    }
-  }
-  if (component_id == num_components)
-  {
-    igprof_debug("No RAPL (Intel energy) component found in PAPI library.\n");
-    return false;
-  }
-  
-  if (component_info->disabled)
-  {
-    igprof_debug("RAPL component of PAPI disabled: %s.\n", 
-      component_info->disabled_reason);
-    return false;
-  }
-
-  // Create an event set.
-  s_event_set = PAPI_NULL;
-  if (PAPI_create_eventset(&s_event_set) != PAPI_OK)
-  {
-    igprof_debug("Could not create PAPI event set.\n");
-    return false;
-  }
-  
-  int code = PAPI_NATIVE_MASK;
-  for (int retval = PAPI_enum_cmp_event(&code, PAPI_ENUM_FIRST, component_id);
-       retval == PAPI_OK;
-       retval = PAPI_enum_cmp_event(&code, PAPI_ENUM_EVENTS, component_id))
-  {
-    char event_name[PAPI_MAX_STR_LEN];
-    if (PAPI_event_code_to_name(code, event_name) != PAPI_OK)
-    {
-      igprof_debug("Could not get PAPI event name.\n");
-      return false;
-    }
-    
-    PAPI_event_info_t event_info;
-    if (PAPI_get_event_info(code, &event_info) != PAPI_OK)
-    {
-      igprof_debug("Could not get PAPI event info.\n");
-      return false;
-    }
-    if (event_info.data_type != PAPI_DATATYPE_UINT64)
-      continue;
-      
-    IgProfTrace::CounterDef *counter = 0;
-    if (strstr(event_name, "PACKAGE_ENERGY_CNT"))
-      counter = &s_ct_pkg;
-    else if (strstr(event_name, "PP0_ENERGY_CNT"))
-      counter = &s_ct_cpu;
-    else if (strstr(event_name, "PP1_ENERGY_CNT"))
-      counter = &s_ct_gpu;
-    else if (strstr(event_name, "DRAM_ENERGY_CNT"))
-      counter = &s_ct_dram;
-
-    if(!counter)
-      continue;
-    
-    igprof_debug("Adding %s to event set.\n", event_name);
-    if (PAPI_add_event(s_event_set, code) != PAPI_OK)
-      break;
-    s_counters.push_back(counter);
-    ++s_num_events;
-  }
-  
-  s_values = (long long *)calloc(s_num_events, sizeof(long long));
-  s_prev_values = (long long *)calloc(s_num_events, sizeof(long long));
-  if (!s_values || !s_prev_values)
-  {
-    igprof_debug("Error allocating memory.\n");
-    return false;
-  }
-  
-  if (PAPI_start(s_event_set) != PAPI_OK)
-  {
-    igprof_debug("Could not start measuring energy using PAPI.\n");
-    return false;
-  }
-  
-  return true;
-  // stop measuring and get the measurements
-  // clean up event set
-  // destroy event set
-#else
-  igprof_debug("IgProf not built with PAPI support.\n");
-  return false;
-#endif // PAPI_FOUND
-}
-
 // -------------------------------------------------------------------
 /** Possibly start energy profiler.  */
 static void
@@ -270,7 +295,7 @@ initialize(void)
     while (*options == ' ' || *options == ',')
       ++options;
 
-    if (! strncmp(options, "nrg", 4))
+    if (! strncmp(options, "nrg", 3))
     {
       enable = true;
       options += 4;
@@ -313,6 +338,7 @@ initialize(void)
   if (! enable)
     return;
 
+/*
   double clockres = 0;
   itimerval precision;
   itimerval interval = { { 0, 5000 }, { 100, 0 } };
@@ -322,21 +348,23 @@ initialize(void)
   setitimer(s_itimer, &nullified, 0);
   clockres = precision.it_interval.tv_sec
              + 1e-6 * precision.it_interval.tv_usec;
+*/
 
-  if (! igprof_init("energy profiler", &threadInit, true, clockres))
+  // Set up PAPI for energy measurements.
+  double scaleFactor; 
+  if (! energyInit(scaleFactor))
+    _exit(1);
+
+  if (! igprof_init("energy profiler", &threadInit, true, scaleFactor))
     return;
 
   igprof_disable_globally();
   if (s_itimer == ITIMER_REAL)
-    igprof_debug("energy profiler: measuring real time\n");
+    igprof_debug("energy profiler: using real time interval timer\n");
   else if (s_itimer == ITIMER_VIRTUAL)
-    igprof_debug("energy profiler: measuring user time\n");
+    igprof_debug("energy profiler: using user time interval timer\n");
   else if (s_itimer == ITIMER_PROF)
-    igprof_debug("energy profiler: measuring process cpu time\n");
-
-  // Set up PAPI for energy measurements.
-  if (!energyInit())
-    return;
+    igprof_debug("energy profiler: using process cpu time interval timer\n");
 
   // Enable profiler.
   IgHook::hook(dofork_hook_main.raw);
@@ -347,6 +375,11 @@ initialize(void)
   IgHook::hook(doclose_hook_main.raw);
   IgHook::hook(dofclose_hook_main.raw);
 #endif
+
+  // Start measuring energy.
+  if (! energyStart())
+    _exit(1);
+  
   igprof_debug("energy profiler enabled\n");
 
   enableSignalHandler();
@@ -454,7 +487,7 @@ dofork(IgHook::SafeData<igprof_dofork_t> &hook)
 
     if (enabled && nticks && (buf = igprof_buffer()))
     {
-      READ_ENERGY(s_event_set, s_values);
+      READ_ENERGY();
 
       void *addresses[IgProfTrace::MAX_DEPTH];
       IgProfTrace::Stack *frame;
@@ -514,7 +547,7 @@ dosystem(IgHook::SafeData<igprof_dosystem_t> &hook, const char *cmd)
   nticks = (ival > 0 ? int(dt / ival + 0.5) : 0);
   if (enabled && nticks && (buf = igprof_buffer()))
   {
-    READ_ENERGY(s_event_set, s_values);
+    READ_ENERGY();
 
     void *addresses[IgProfTrace::MAX_DEPTH];
     IgProfTrace::Stack *frame;
