@@ -26,7 +26,7 @@ usage() {
   echo -e "-fpi:FUNC:LIB	       \tprofile cpu cycles spent in function X which returns integer or pointer"
   echo -e "-fpf:FUNC:LIB	       \tprofile cpu cycles spent in function X which returns floating point number"
   echo -e "-j, --jemalloc	       \tuse libjemalloc.so library instead of libc.so.6"
-  echo -e "-np, --energy-profiling	   \tstart the energy profiler"
+  echo -e "-np, --energy-profiler      \tstart the energy profiler"
   echo -e "[--] cmd [args...]          \tcommand arguments to execute"
 }
 
