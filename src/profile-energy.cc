@@ -43,19 +43,21 @@ LIBHOOK(1, int, doclose, _main, (int fd), (fd), "close", 0, 0)
 #endif
 
 // Data for this profiler module
-static IgProfTrace::CounterDef  s_ct_pkg        = { "NRG_PKG", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_pp0        = { "NRG_PP0", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_pp1        = { "NRG_PP1", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_dram       = { "NRG_DRAM", IgProfTrace::TICK, -1, 0 };
 static bool                     s_initialized   = false;
 static bool                     s_keep          = false;
 static int                      s_signal        = SIGPROF;
 static int                      s_itimer        = ITIMER_PROF;
-static int                      s_event_set     = 0;
 static int                      s_num_events    = 0;
 static long long                *s_values[2]    = { 0, 0 };
 static int                      s_cur_index     = 0;
 static std::vector<IgProfTrace::CounterDef *> s_counters;
+#ifdef PAPI_FOUND
+static IgProfTrace::CounterDef  s_ct_pkg        = { "NRG_PKG", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pp0        = { "NRG_PP0", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pp1        = { "NRG_PP1", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_dram       = { "NRG_DRAM", IgProfTrace::TICK, -1, 0 };
+static int                      s_event_set     = 0;
+#endif
 
 /** Set up PAPI for energy measurements. */
 static bool
@@ -166,6 +168,7 @@ energyInit(double &scaleFactor)
   // clean up event set
   // destroy event set
 #else
+  (void)scaleFactor; // to suppress error about not used
   fprintf(stderr, "IgProf not built with PAPI support.\n");
   return false;
 #endif // PAPI_FOUND
