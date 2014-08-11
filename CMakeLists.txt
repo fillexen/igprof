@@ -52,7 +52,7 @@ ELSE(PAPI_INCLUDE_DIR AND PAPI_LIBRARY)
 ENDIF(PAPI_INCLUDE_DIR AND PAPI_LIBRARY)
 IF(PAPI_FOUND)
   SET(IGPROF_LIBS ${IGPROF_LIBS} ${PAPI_LIBRARY})
-  # Treat the directory containing papi.h as a system include directory in 
+  # Treat the directory containing papi.h as a system include directory in
   # order to suppress the "comma at end of enumerator list" error. The PAPI
   # header file does not conform to ANSI C.
   ADD_DEFINITIONS("-isystem ${PAPI_INCLUDE_DIR}")
@@ -117,7 +117,7 @@ IF(PCRE_FOUND)
   INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR} ${UNWIND_INCLUDE_DIR}
                       ${PCRE_INCLUDE_DIR} ${PAPI_INCLUDE_DIR})
 ELSE()
-  INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR} ${UNWIND_INCLUDE_DIR} 
+  INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR} ${UNWIND_INCLUDE_DIR}
                       ${PAPI_INCLUDE_DIR})
 ENDIF()
 ADD_LIBRARY(igprof SHARED
