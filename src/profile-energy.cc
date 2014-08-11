@@ -11,10 +11,10 @@
 #include <vector>
 #include <unistd.h>
 #ifdef PAPI_FOUND
-#  include <papi.h>
-#  define READ_ENERGY() PAPI_read(s_event_set, s_values[s_cur_index])
+# include <papi.h>
+# define READ_ENERGY() PAPI_read(s_event_set, s_values[s_cur_index])
 #else
-#  define READ_ENERGY() /* */
+# define READ_ENERGY() /* */
 #endif
 
 #ifdef __APPLE__
@@ -44,8 +44,8 @@ LIBHOOK(1, int, doclose, _main, (int fd), (fd), "close", 0, 0)
 
 // Data for this profiler module
 static IgProfTrace::CounterDef  s_ct_pkg        = { "NRG_PKG", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_cpu        = { "NRG_CPU", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_gpu        = { "NRG_GPU", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pp0        = { "NRG_PP0", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pp1        = { "NRG_PP1", IgProfTrace::TICK, -1, 0 };
 static IgProfTrace::CounterDef  s_ct_dram       = { "NRG_DRAM", IgProfTrace::TICK, -1, 0 };
 static bool                     s_initialized   = false;
 static bool                     s_keep          = false;
@@ -126,9 +126,9 @@ energyInit(double &scaleFactor)
     if (strstr(event_name, "PACKAGE_ENERGY_CNT"))
       counter = &s_ct_pkg;
     else if (strstr(event_name, "PP0_ENERGY_CNT"))
-      counter = &s_ct_cpu;
+      counter = &s_ct_pp0;
     else if (strstr(event_name, "PP1_ENERGY_CNT"))
-      counter = &s_ct_gpu;
+      counter = &s_ct_pp1;
     else if (strstr(event_name, "DRAM_ENERGY_CNT"))
       counter = &s_ct_dram;
 
@@ -143,7 +143,7 @@ energyInit(double &scaleFactor)
   }
   if (s_num_events == 0)
   {
-    fprintf(stderr, "Could not find any RAPL events.");
+    fprintf(stderr, "Could not find any RAPL events.\n");
     return false;
   }
 
