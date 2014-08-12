@@ -12,9 +12,9 @@
 #include <unistd.h>
 #ifdef PAPI_FOUND
 # include <papi.h>
-# define READ_ENERGY() PAPI_read(s_event_set, s_values[s_cur_index])
+# define READ_ENERGY(a) PAPI_read(s_event_set, a)
 #else
-# define READ_ENERGY() /* */
+# define READ_ENERGY(a) ((void)s_event_set)
 #endif
 
 #ifdef __APPLE__
@@ -23,8 +23,10 @@ typedef sig_t sighandler_t;
 
 // -------------------------------------------------------------------
 // Traps for this profiler module
+#if 0
 LIBHOOK(0, int, dofork, _main, (), (), "fork", 0, 0)
 LIBHOOK(1, int, dosystem, _main, (const char *cmd), (cmd), "system", 0, 0)
+#endif
 LIBHOOK(3, int, dopthread_sigmask, _main,
         (int how, sigset_t *newmask, sigset_t *oldmask),
         (how, newmask, oldmask),
@@ -43,25 +45,24 @@ LIBHOOK(1, int, doclose, _main, (int fd), (fd), "close", 0, 0)
 #endif
 
 // Data for this profiler module
+static IgProfTrace::CounterDef  s_ct_pkg        = { "NRG_PKG", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pp0        = { "NRG_PP0", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_pp1        = { "NRG_PP1", IgProfTrace::TICK, -1, 0 };
+static IgProfTrace::CounterDef  s_ct_dram       = { "NRG_DRAM", IgProfTrace::TICK, -1, 0 };
 static bool                     s_initialized   = false;
 static bool                     s_keep          = false;
 static int                      s_signal        = SIGPROF;
 static int                      s_itimer        = ITIMER_PROF;
 static int                      s_num_events    = 0;
-static long long                *s_values[2]    = { 0, 0 };
-static int                      s_cur_index     = 0;
-static std::vector<IgProfTrace::CounterDef *> s_counters;
-#ifdef PAPI_FOUND
-static IgProfTrace::CounterDef  s_ct_pkg        = { "NRG_PKG", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_pp0        = { "NRG_PP0", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_pp1        = { "NRG_PP1", IgProfTrace::TICK, -1, 0 };
-static IgProfTrace::CounterDef  s_ct_dram       = { "NRG_DRAM", IgProfTrace::TICK, -1, 0 };
 static int                      s_event_set     = 0;
-#endif
+static long long                *s_values       = 0;
+static long long                *s_zero_levels  = 0;
+const static int                s_threshold     = 100000;
+static std::vector<IgProfTrace::CounterDef *> s_counters;
 
 /** Set up PAPI for energy measurements. */
 static bool
-energyInit(double &scaleFactor)
+energyInit()
 {
 #ifdef PAPI_FOUND
   if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT)
@@ -150,61 +151,30 @@ energyInit(double &scaleFactor)
   }
 
   // Allocate two arrays for the readings in one go: one for the current
-  // readings and one for the previous readings.
-  s_values[0] = (long long *)calloc(2 * s_num_events, sizeof(long long));
-  s_values[1] = s_values[0] + s_num_events;
-  if (! s_values[0])
+  // readings and one for the zero levels.
+  s_values = (long long *)calloc(s_num_events, sizeof(long long));
+  s_zero_levels = (long long *)calloc(s_num_events, sizeof(long long));
+  if (! s_values || ! s_zero_levels)
   {
     fprintf(stderr, "Could not allocate memory.\n");
     return false;
   }
 
-  // Set the scale factor for the RAPL energy readings:
-  // one integer step is 15.3 microjoules, scale everything to joules.
-  scaleFactor = 0.0000153;
+  // Activate the event set.
+  if (PAPI_start(s_event_set) != PAPI_OK)
+  {
+    fprintf(stderr, "Could not activate the event set.\n");
+    return false;
+  }
+
+  // Set the zero levels to the current energy levels.
+  READ_ENERGY(s_zero_levels);
 
   return true;
-  // stop measuring and get the measurements
-  // clean up event set
-  // destroy event set
 #else
-  (void)scaleFactor; // to suppress error about not used
   fprintf(stderr, "IgProf not built with PAPI support.\n");
   return false;
 #endif // PAPI_FOUND
-}
-
-/** Start measuring energy through PAPI. */
-static bool
-energyStart(void)
-{
-#ifdef PAPI_FOUND
-  if (PAPI_start(s_event_set) == PAPI_OK)
-    return true;
-
-  fprintf(stderr, "Could not start measuring energy using PAPI.\n");
-#endif
-  return false;
-}
-
-/** Tick the energy measurement counters. It is necessary to actually read
-    the measurements (using READ_ENERGY()) before calling this function. */
-static void
-tickEnergyCounters(IgProfTrace *buf, IgProfTrace::Stack *frame, int nticks)
-{
-  int prev_index = 1 - s_cur_index;
-
-  for (int i = 0; i < s_num_events; ++i)
-  {
-    ASSERT(s_counters[i]);
-    // Use the difference between the current and the previous reading.
-    buf->tick(frame, s_counters[i],
-              s_values[s_cur_index][i] - s_values[prev_index][i],
-              nticks);
-  }
-
-  // Swap buffers.
-  s_cur_index = prev_index;
 }
 
 /** Convert timeval to seconds. */
@@ -219,31 +189,54 @@ static inline double tv2sec(const timeval &tv)
 static void
 profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
 {
-  void *addresses[IgProfTrace::MAX_DEPTH];
-  if (LIKELY(igprof_disable()))
+  READ_ENERGY(s_values);
+
+  bool stack_trace_done = false;
+  IgProfTrace *buf = 0;
+  int depth = 0;
+  IgProfTrace::Stack *frame = 0;
+  uint64_t tstart = 0, tend = 0;
+  
+  for (int i = 0; i < s_num_events; ++i)
   {
-    IgProfTrace *buf = igprof_buffer();
-    if (LIKELY(buf))
+    if (s_values[i] - s_zero_levels[i] >= s_threshold)
     {
-      READ_ENERGY();
+      s_zero_levels[i] = s_values[i];
 
-      IgProfTrace::Stack *frame;
-      uint64_t tstart, tend;
-      int depth;
+      // Perform stack tracing when the first overflow event has occurred.
+      // In case no event occurs this time, the stack is not traced.
+      if (! stack_trace_done)
+      {
+        void *addresses[IgProfTrace::MAX_DEPTH];
+        if (LIKELY(igprof_disable()))
+        {
+          buf = igprof_buffer();
+          if (LIKELY(buf))
+          {
+            RDTSC(tstart);
+            depth = IgHookTrace::stacktrace(addresses, IgProfTrace::MAX_DEPTH);
+            RDTSC(tend);
 
-      RDTSC(tstart);
-      depth = IgHookTrace::stacktrace(addresses, IgProfTrace::MAX_DEPTH);
-      RDTSC(tend);
+            // Drop top two stackframes (me, signal frame).
+            buf->lock();
+            frame = buf->push(addresses+2, depth-2);
+          }
+        }
+        stack_trace_done = true;
+      }
 
-      // Drop top two stackframes (me, signal frame).
-      buf->lock();
-      frame = buf->push(addresses+2, depth-2);
-      // buf->tick(frame, &s_ct_ticks, 1, 1);
-      tickEnergyCounters(buf, frame, 1);
-      buf->traceperf(depth, tstart, tend);
-      buf->unlock();
+      // Tick the corresponding counter.
+      ASSERT(s_counters[i]);
+      buf->tick(frame, s_counters[i], 1, 1);
     }
   }
+
+  if (stack_trace_done)
+  {
+    buf->traceperf(depth, tstart, tend);
+    buf->unlock();
+  }
+
   igprof_enable();
 }
 
@@ -253,7 +246,7 @@ profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
 static void
 enableTimer(void)
 {
-  itimerval interval = { { 0, 5000 }, { 0, 5000 } };
+  itimerval interval = { { 0, 1000 }, { 0, 1000 } };
   setitimer(s_itimer, &interval, 0);
 }
 
@@ -271,15 +264,6 @@ enableSignalHandler(void)
   sa.sa_handler = (sighandler_t) &profileSignalHandler;
   sa.sa_flags = SA_RESTART | SA_SIGINFO;
   sigaction(s_signal, &sa, 0);
-}
-
-/** Thread setup function.  */
-static void
-threadInit(void)
-{
-  // Enable profiling in this thread.
-  enableSignalHandler();
-  enableTimer();
 }
 
 // -------------------------------------------------------------------
@@ -341,12 +325,7 @@ initialize(void)
   if (! enable)
     return;
 
-  // Set up PAPI for energy measurements.
-  double scaleFactor;
-  if (! energyInit(scaleFactor))
-    _exit(1);
-
-  if (! igprof_init("energy profiler", &threadInit, true, scaleFactor))
+  if (! igprof_init("energy profiler", 0, false))
     return;
 
   igprof_disable_globally();
@@ -358,8 +337,10 @@ initialize(void)
     igprof_debug("energy profiler: using process cpu time interval timer\n");
 
   // Enable profiler.
+#if 0
   IgHook::hook(dofork_hook_main.raw);
   IgHook::hook(dosystem_hook_main.raw);
+#endif
   IgHook::hook(dopthread_sigmask_hook_main.raw);
   IgHook::hook(dosigaction_hook_main.raw);
 #ifndef __arm__
@@ -367,8 +348,8 @@ initialize(void)
   IgHook::hook(dofclose_hook_main.raw);
 #endif
 
-  // Start measuring energy.
-  if (! energyStart())
+  // Set up PAPI for energy measurements.
+  if (! energyInit())
     _exit(1);
 
   igprof_debug("energy profiler enabled\n");
@@ -429,6 +410,7 @@ dosigaction(IgHook::SafeData<igprof_dosigaction_t> &hook,
   return hook.chain(signum, act, oact);
 }
 
+#if 0
 // Trap fork to deactivate profiling around it, then artificially
 // add back the cost associated to actual fork call. This trickery
 // is required because large processes can take a rather long time
@@ -562,6 +544,7 @@ dosystem(IgHook::SafeData<igprof_dosystem_t> &hook, const char *cmd)
   igprof_enable();
   return ret;
 }
+#endif
 
 #ifndef __arm__
 // If the profiled program closes stderr stream the igprof_debug got to be
