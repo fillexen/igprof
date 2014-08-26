@@ -11,6 +11,7 @@
 #include <vector>
 #include <unistd.h>
 #ifdef PAPI_FOUND
+# include <stdint.h>
 # include <papi.h>
 # define READ_ENERGY(a) PAPI_read(s_event_set, a)
 #else
@@ -57,7 +58,7 @@ static int                      s_num_events    = 0;
 static int                      s_event_set     = 0;
 static long long                *s_values       = 0;
 static long long                *s_zero_levels  = 0;
-const static int                s_threshold     = 100000;
+const static uint32_t           s_threshold     = 1000;
 static std::vector<IgProfTrace::CounterDef *> s_counters;
 
 /** Set up PAPI for energy measurements. */
@@ -199,9 +200,11 @@ profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
   
   for (int i = 0; i < s_num_events; ++i)
   {
-    if (s_values[i] - s_zero_levels[i] >= s_threshold)
+    // The RAPL registers are 32-bit wide, but PAPI provides the values as 
+    // 64 bits without taking into account overflows.
+    if ((uint32_t)s_values[i] - (uint32_t)s_zero_levels[i] >= s_threshold)
     {
-      s_zero_levels[i] = s_values[i];
+      s_zero_levels[i] = (uint32_t)s_values[i];
 
       // Perform stack tracing when the first overflow event has occurred.
       // In case no event occurs this time, the stack is not traced.
