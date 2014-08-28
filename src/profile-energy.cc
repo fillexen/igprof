@@ -11,10 +11,11 @@
 #include <vector>
 #include <unistd.h>
 #ifdef PAPI_FOUND
+# include <stdint.h>
 # include <papi.h>
-# define READ_ENERGY() PAPI_read(s_event_set, s_values[s_cur_index])
+# define READ_ENERGY(array) PAPI_read(s_event_set, array)
 #else
-# define READ_ENERGY() /* */
+# define READ_ENERGY(array) /* */
 #endif
 
 #ifdef __APPLE__
@@ -23,8 +24,10 @@ typedef sig_t sighandler_t;
 
 // -------------------------------------------------------------------
 // Traps for this profiler module
+#if 0
 LIBHOOK(0, int, dofork, _main, (), (), "fork", 0, 0)
 LIBHOOK(1, int, dosystem, _main, (const char *cmd), (cmd), "system", 0, 0)
+#endif
 LIBHOOK(3, int, dopthread_sigmask, _main,
         (int how, sigset_t *newmask, sigset_t *oldmask),
         (how, newmask, oldmask),
@@ -137,9 +140,13 @@ energyInit(double &scaleFactor)
     if (! counter)
       continue;
 
-    igprof_debug("Adding %s to event set.\n", event_name);
     if (PAPI_add_event(s_event_set, code) != PAPI_OK)
-      break;
+    {
+      fprintf(stderr, "Could not add %s to event set.\n", event_name);
+      continue;
+    }
+
+    igprof_debug("Event %s added to event set.\n", event_name);
     s_counters.push_back(counter);
     ++s_num_events;
   }
@@ -151,9 +158,9 @@ energyInit(double &scaleFactor)
 
   // Allocate two arrays for the readings in one go: one for the current
   // readings and one for the previous readings.
-  s_values[0] = (long long *)calloc(2 * s_num_events, sizeof(long long));
-  s_values[1] = s_values[0] + s_num_events;
-  if (! s_values[0])
+  s_values[0] = (long long *)calloc(s_num_events, sizeof(long long));
+  s_values[1] = (long long *)calloc(s_num_events, sizeof(long long));
+  if (! s_values[0] || ! s_values[1])
   {
     fprintf(stderr, "Could not allocate memory.\n");
     return false;
@@ -179,10 +186,15 @@ static bool
 energyStart(void)
 {
 #ifdef PAPI_FOUND
-  if (PAPI_start(s_event_set) == PAPI_OK)
-    return true;
+  if (PAPI_start(s_event_set) != PAPI_OK)
+  {
+    fprintf(stderr, "Could not start measuring energy using PAPI.\n");
+    return false;
+  }
 
-  fprintf(stderr, "Could not start measuring energy using PAPI.\n");
+  READ_ENERGY(s_values[1]);
+
+  return true;
 #endif
   return false;
 }
@@ -199,7 +211,7 @@ tickEnergyCounters(IgProfTrace *buf, IgProfTrace::Stack *frame, int nticks)
     ASSERT(s_counters[i]);
     // Use the difference between the current and the previous reading.
     buf->tick(frame, s_counters[i],
-              s_values[s_cur_index][i] - s_values[prev_index][i],
+              (uint32_t)(s_values[s_cur_index][i] - s_values[prev_index][i]),
               nticks);
   }
 
@@ -225,7 +237,7 @@ profileSignalHandler(int /* nsig */, siginfo_t * /* info */, void * /* ctx */)
     IgProfTrace *buf = igprof_buffer();
     if (LIKELY(buf))
     {
-      READ_ENERGY();
+      READ_ENERGY(s_values[s_cur_index]);
 
       IgProfTrace::Stack *frame;
       uint64_t tstart, tend;
@@ -271,15 +283,6 @@ enableSignalHandler(void)
   sa.sa_handler = (sighandler_t) &profileSignalHandler;
   sa.sa_flags = SA_RESTART | SA_SIGINFO;
   sigaction(s_signal, &sa, 0);
-}
-
-/** Thread setup function.  */
-static void
-threadInit(void)
-{
-  // Enable profiling in this thread.
-  enableSignalHandler();
-  enableTimer();
 }
 
 // -------------------------------------------------------------------
@@ -346,7 +349,7 @@ initialize(void)
   if (! energyInit(scaleFactor))
     _exit(1);
 
-  if (! igprof_init("energy profiler", &threadInit, true, scaleFactor))
+  if (! igprof_init("energy profiler", 0, false, scaleFactor))
     return;
 
   igprof_disable_globally();
@@ -358,8 +361,10 @@ initialize(void)
     igprof_debug("energy profiler: using process cpu time interval timer\n");
 
   // Enable profiler.
+#if 0
   IgHook::hook(dofork_hook_main.raw);
   IgHook::hook(dosystem_hook_main.raw);
+#endif
   IgHook::hook(dopthread_sigmask_hook_main.raw);
   IgHook::hook(dosigaction_hook_main.raw);
 #ifndef __arm__
@@ -429,6 +434,7 @@ dosigaction(IgHook::SafeData<igprof_dosigaction_t> &hook,
   return hook.chain(signum, act, oact);
 }
 
+#if 0
 // Trap fork to deactivate profiling around it, then artificially
 // add back the cost associated to actual fork call. This trickery
 // is required because large processes can take a rather long time
@@ -562,6 +568,7 @@ dosystem(IgHook::SafeData<igprof_dosystem_t> &hook, const char *cmd)
   igprof_enable();
   return ret;
 }
+#endif
 
 #ifndef __arm__
 // If the profiled program closes stderr stream the igprof_debug got to be
